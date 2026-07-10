@@ -9,6 +9,8 @@ Requires:  pip install -r requirements.txt
 """
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -104,6 +106,20 @@ def _short_metadata_summary(report) -> str:
     return text or "metadata present"
 
 
+def reveal_in_file_manager(path: Path) -> None:
+    """Open the OS file manager with this file selected/visible."""
+    path = Path(path)
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.run(["explorer", "/select,", str(path)], timeout=5)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", "-R", str(path)], timeout=5)
+        else:
+            subprocess.run(["xdg-open", str(path.parent)], timeout=5)
+    except Exception:
+        pass
+
+
 STATE_COLOR = {
     "pending": PENDING,
     "processing": CYAN,
@@ -134,6 +150,7 @@ class ImageCard:
 
         self.before_photo = _placeholder_thumbnail()
         self.after_photo = _placeholder_thumbnail()
+        self.output_path: Path | None = None
 
         self.canvas = tk.Canvas(parent, height=CARD_HEIGHT, bg=LIST_BG, highlightthickness=0)
         self.canvas.pack(fill=X, pady=6, padx=2)
@@ -161,12 +178,13 @@ class ImageCard:
         )
 
         pad = 16
+        control_col_w = 64  # reserved on the right for the X / [ OPEN ] controls
         thumb_y = h // 2
 
         c.create_image(pad + THUMB_SIZE[0] // 2, thumb_y, image=self.before_photo)
 
         text_x = pad * 2 + THUMB_SIZE[0]
-        after_x = w - pad - THUMB_SIZE[0] // 2
+        after_x = w - pad - control_col_w - THUMB_SIZE[0] // 2
         arrow_x = after_x - THUMB_SIZE[0] // 2 - 34
         text_wrap = max(120, arrow_x - 34 - text_x)
 
@@ -206,8 +224,19 @@ class ImageCard:
         )
         c.tag_bind("remove", "<Button-1>", lambda e: self.on_remove(self))
 
+        open_text = c.create_text(
+            w - 14, 34, text="[ OPEN ]", font=BADGE_FONT, fill=GREEN_DIM, tags="open", anchor="ne"
+        )
+        c.tag_bind("open", "<Button-1>", lambda e: self._open_in_explorer())
+        c.tag_bind("open", "<Enter>", lambda e: c.itemconfig(open_text, fill=GREEN))
+        c.tag_bind("open", "<Leave>", lambda e: c.itemconfig(open_text, fill=GREEN_DIM))
+
     def _on_click(self, _event):
         pass
+
+    def _open_in_explorer(self):
+        target = self.output_path if self.output_path is not None else self.path
+        threading.Thread(target=reveal_in_file_manager, args=(target,), daemon=True).start()
 
     # ---- state updates -----------------------------------------------------
 
@@ -231,6 +260,7 @@ class ImageCard:
         self._redraw()
 
     def set_done(self, out_path: Path, after_report):
+        self.output_path = out_path
         try:
             self.after_photo = _load_thumbnail(out_path)
         except Exception:
