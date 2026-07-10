@@ -12,7 +12,7 @@ from __future__ import annotations
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 import ttkbootstrap as ttk
 from PIL import Image, ImageDraw, ImageTk
@@ -22,33 +22,36 @@ from core import SUPPORTED_EXTENSIONS, default_output_path, inspect_metadata, st
 
 APP_TITLE = "Metadata Remover"
 
-# ---- palette --------------------------------------------------------------
-APP_BG = "#0d0e12"
-LIST_BG = "#111319"
-CARD_BG = "#1b1e26"
-CARD_BG_RGB = (27, 30, 38)
-CARD_BORDER = "#2a2e3a"
-TEXT_PRIMARY = "#f3f4f6"
-TEXT_SECONDARY = "#9aa0b0"
-TEXT_MUTED = "#565c6c"
-ACCENT = "#8b6bf2"
-SUCCESS = "#34d399"
-WARNING = "#f2b84b"
-DANGER = "#f2685c"
-PENDING = "#4a4f5e"
-PROCESSING = "#5b9bf2"
+# ---- palette: black-and-neon terminal theme --------------------------------
+BG = "#060907"
+LIST_BG = "#08100c"
+SCANLINE = "#0b1811"
+CARD_BG = "#0c1611"
+CARD_BG_RGB = (12, 22, 17)
+CARD_BORDER = "#1c3327"
+TEXT_PRIMARY = "#dffff0"
+TEXT_SECONDARY = "#6fae82"
+TEXT_MUTED = "#375242"
+GREEN = "#39ff88"
+GREEN_DIM = "#1f8a4d"
+CYAN = "#3ce6ff"
+WARNING = "#ffd23f"
+DANGER = "#ff4d4d"
+PENDING = "#375242"
 
-TITLE_FONT = ("Segoe UI", 21, "bold")
-SUBTITLE_FONT = ("Segoe UI", 10)
-BODY_FONT = ("Segoe UI", 11)
-NAME_FONT = ("Segoe UI", 11, "bold")
-META_FONT = ("Segoe UI", 9)
-BADGE_FONT = ("Segoe UI", 8, "bold")
+MONO = "Consolas"
+TITLE_FONT = (MONO, 22, "bold")
+SUBTITLE_FONT = (MONO, 10)
+BODY_FONT = (MONO, 11)
+NAME_FONT = (MONO, 11, "bold")
+META_FONT = (MONO, 9)
+BADGE_FONT = (MONO, 8, "bold")
+STATUS_FONT = (MONO, 10, "bold")
 
 THUMB_SIZE = (100, 100)
-THUMB_RADIUS = 16
+THUMB_RADIUS = 4
 CARD_HEIGHT = 132
-CARD_RADIUS = 18
+CARD_RADIUS = 6
 
 
 # ---- image helpers ----------------------------------------------------------
@@ -61,8 +64,6 @@ def _rounded_mask(size, radius):
 
 
 def _load_thumbnail(path: Path, size=THUMB_SIZE) -> ImageTk.PhotoImage:
-    """Rounded-corner thumbnail, letterboxed onto a card-colored tile so
-    every card lines up regardless of the source image's aspect ratio."""
     with Image.open(path) as img:
         img = img.convert("RGB")
         img.thumbnail(size)
@@ -78,7 +79,7 @@ def _placeholder_thumbnail(size=THUMB_SIZE) -> ImageTk.PhotoImage:
     tile = Image.new("RGBA", size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(tile)
     draw.rounded_rectangle(
-        [1, 1, size[0] - 2, size[1] - 2], radius=THUMB_RADIUS, outline="#2f3340", width=2
+        [1, 1, size[0] - 2, size[1] - 2], radius=THUMB_RADIUS, outline="#1c3327", width=2
     )
     return ImageTk.PhotoImage(tile)
 
@@ -94,35 +95,41 @@ def _round_rect_points(x1, y1, x2, y2, r):
 
 def _short_metadata_summary(report) -> str:
     if report.is_empty:
-        return "No metadata found"
+        return "no metadata found"
     parts = list(report.exif_tags.keys())[:3]
     text = ", ".join(parts)
     remaining = len(report.exif_tags) - len(parts) + len(report.info_keys)
     if remaining > 0:
         text += f" +{remaining} more" if text else f"{remaining} field(s)"
-    return text or "Metadata present"
+    return text or "metadata present"
 
 
-STATE_STYLE = {
-    "pending": (PENDING, "Not processed yet"),
-    "processing": (PROCESSING, "Processing..."),
-    "done": (SUCCESS, None),
-    "warn": (WARNING, None),
-    "failed": (DANGER, None),
+STATE_COLOR = {
+    "pending": PENDING,
+    "processing": CYAN,
+    "done": GREEN,
+    "warn": WARNING,
+    "failed": DANGER,
+}
+STATE_LABEL = {
+    "pending": "[ QUEUED ]",
+    "processing": "[ SCANNING... ]",
+    "done": None,
+    "warn": None,
+    "failed": None,
 }
 
 
 class ImageCard:
-    """One image, rendered as a single rounded-rect canvas so the corners,
-    thumbnails, and accent color are drawn together rather than stacked
-    from separate square widgets."""
+    """One image, rendered as a single canvas so the panel border, accent
+    bar, thumbnails, and status tag are all drawn together."""
 
     def __init__(self, parent, path: Path, on_remove):
         self.path = path
         self.on_remove = on_remove
         self.state = "pending"
-        self.status_text = "Not processed yet"
-        self.summary = "Scanning..."
+        self.status_text = "[ QUEUED ]"
+        self.summary = "scanning..."
         self.summary_color = TEXT_SECONDARY
 
         self.before_photo = _placeholder_thumbnail()
@@ -131,7 +138,6 @@ class ImageCard:
         self.canvas = tk.Canvas(parent, height=CARD_HEIGHT, bg=LIST_BG, highlightthickness=0)
         self.canvas.pack(fill=X, pady=6, padx=2)
         self.canvas.bind("<Configure>", lambda e: self._redraw())
-        self.canvas.bind("<Button-1>", self._on_click)
 
     # ---- drawing ----------------------------------------------------------
 
@@ -143,26 +149,22 @@ class ImageCard:
         if w < 10:
             return
 
-        accent, _ = STATE_STYLE[self.state]
+        accent = STATE_COLOR[self.state]
 
-        # card background
         c.create_polygon(
             _round_rect_points(1, 1, w - 1, h - 1, CARD_RADIUS),
-            smooth=True, fill=CARD_BG, outline=CARD_BORDER, width=1,
+            smooth=True, fill=CARD_BG, outline=accent if self.state != "pending" else CARD_BORDER, width=1,
         )
-        # left accent bar (rounded to match card's left corners)
         c.create_polygon(
-            _round_rect_points(1, 1, 6, h - 1, CARD_RADIUS),
+            _round_rect_points(1, 1, 5, h - 1, CARD_RADIUS),
             smooth=True, fill=accent, outline="",
         )
 
         pad = 16
         thumb_y = h // 2
 
-        # before thumbnail
         c.create_image(pad + THUMB_SIZE[0] // 2, thumb_y, image=self.before_photo)
 
-        # text block
         text_x = pad * 2 + THUMB_SIZE[0]
         after_x = w - pad - THUMB_SIZE[0] // 2
         arrow_x = after_x - THUMB_SIZE[0] // 2 - 34
@@ -176,49 +178,33 @@ class ImageCard:
             text_x, thumb_y - 6, anchor="w", text=self.summary,
             font=META_FONT, fill=self.summary_color, width=text_wrap,
         )
-        # status pill
+
         pill_text = self.status_text
-        pill_pad_x = 8
-        text_id = c.create_text(
-            0, 0, anchor="nw", text=pill_text, font=BADGE_FONT
-        )
+        text_id = c.create_text(0, 0, anchor="nw", text=pill_text, font=BADGE_FONT)
         bbox = c.bbox(text_id)
         c.delete(text_id)
+        pill_pad_x = 8
         pill_w = (bbox[2] - bbox[0]) + pill_pad_x * 2 if bbox else 60
         pill_h = 20
         pill_y0 = thumb_y + 12
-        c.create_polygon(
-            _round_rect_points(text_x, pill_y0, text_x + pill_w, pill_y0 + pill_h, pill_h / 2),
-            smooth=True, fill=self._pill_bg(accent), outline="",
+        c.create_rectangle(
+            text_x, pill_y0, text_x + pill_w, pill_y0 + pill_h,
+            fill=CARD_BG, outline=accent, width=1,
         )
         c.create_text(
             text_x + pill_w / 2, pill_y0 + pill_h / 2, text=pill_text,
             font=BADGE_FONT, fill=accent,
         )
 
-        # arrow badge (circle + chevron)
-        r = 15
-        c.create_oval(arrow_x - r, thumb_y - r, arrow_x + r, thumb_y + r, fill="#20232c", outline=accent, width=2)
-        c.create_text(arrow_x, thumb_y, text="›", font=("Segoe UI", 15, "bold"), fill=accent)
+        # arrow: double chevron, monospace, terminal-style
+        c.create_text(arrow_x, thumb_y, text=">>", font=(MONO, 15, "bold"), fill=accent)
 
-        # after thumbnail
         c.create_image(after_x, thumb_y, image=self.after_photo)
 
-        # remove (x) button, top-right
         c.create_text(
-            w - 16, 16, text="✕", font=("Segoe UI", 11), fill=TEXT_MUTED, tags="remove", anchor="ne"
+            w - 14, 14, text="X", font=(MONO, 10, "bold"), fill=TEXT_MUTED, tags="remove", anchor="ne"
         )
         c.tag_bind("remove", "<Button-1>", lambda e: self.on_remove(self))
-
-    @staticmethod
-    def _pill_bg(hex_color: str) -> str:
-        # a dim tint of the accent color for the pill background
-        hex_color = hex_color.lstrip("#")
-        r, g, b = (int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
-        r = int(r * 0.22)
-        g = int(g * 0.22)
-        b = int(b * 0.22)
-        return f"#{r:02x}{g:02x}{b:02x}"
 
     def _on_click(self, _event):
         pass
@@ -235,13 +221,13 @@ class ImageCard:
         self._redraw()
 
     def set_scan_error(self, exc):
-        self.summary = f"Couldn't read: {exc}"
+        self.summary = f"couldn't read: {exc}"
         self.summary_color = DANGER
         self._redraw()
 
     def set_processing(self):
         self.state = "processing"
-        self.status_text = "Processing..."
+        self.status_text = "[ SCANNING... ]"
         self._redraw()
 
     def set_done(self, out_path: Path, after_report):
@@ -251,15 +237,15 @@ class ImageCard:
             pass
         if after_report.is_empty:
             self.state = "done"
-            self.status_text = f"Clean → {out_path.name}"
+            self.status_text = "[ CLEAN ]"
         else:
             self.state = "warn"
-            self.status_text = "Some metadata may remain"
+            self.status_text = "[ PARTIAL ]"
         self._redraw()
 
     def set_failed(self, exc):
         self.state = "failed"
-        self.status_text = f"Failed: {exc}"
+        self.status_text = "[ FAILED ]"
         self._redraw()
 
     def destroy(self):
@@ -279,12 +265,19 @@ class ScrollableCardList(ttk.Frame):
         self.canvas.bind("<Configure>", self._on_canvas_resize)
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
 
+        self._draw_scanlines()
+
         self.canvas.pack(side=LEFT, fill=BOTH, expand=True)
         self.scrollbar.pack(side=RIGHT, fill=Y)
 
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind_all("<Button-4>", lambda e: self.canvas.yview_scroll(-2, "units"))
         self.canvas.bind_all("<Button-5>", lambda e: self.canvas.yview_scroll(2, "units"))
+
+    def _draw_scanlines(self):
+        for y in range(0, 2000, 3):
+            self.canvas.create_line(0, y, 4000, y, fill=SCANLINE, tags="scanline")
+        self.canvas.tag_lower("scanline")
 
     def _on_canvas_resize(self, event):
         self.canvas.itemconfig(self._window, width=event.width)
@@ -296,56 +289,62 @@ class ScrollableCardList(ttk.Frame):
 class MetadataRemoverApp(ttk.Window):
     def __init__(self):
         super().__init__(title=APP_TITLE, themename="darkly", size=(960, 780), minsize=(780, 620))
-        self.configure(bg=APP_BG)
+        self.configure(bg=BG)
+        self._setup_style()
 
         self.cards: dict[Path, ImageCard] = {}
         self.output_dir: Path | None = None
 
         self._build_widgets()
 
+    def _setup_style(self):
+        style = self.style
+        style.configure("TButton", font=(MONO, 10, "bold"))
+        style.configure("success.TButton", font=(MONO, 10, "bold"))
+
     # ---- UI construction -------------------------------------------------
 
     def _build_widgets(self):
-        outer = tk.Frame(self, bg=APP_BG, padx=22, pady=20)
+        outer = tk.Frame(self, bg=BG, padx=22, pady=20)
         outer.pack(fill=BOTH, expand=True)
 
-        header = tk.Frame(outer, bg=APP_BG)
+        header = tk.Frame(outer, bg=BG)
         header.pack(fill=X, pady=(0, 16))
-        tk.Label(header, text="Metadata Remover", font=TITLE_FONT, bg=APP_BG, fg=TEXT_PRIMARY).pack(anchor="w")
+        tk.Label(header, text="> METADATA_REMOVER", font=TITLE_FONT, bg=BG, fg=GREEN).pack(anchor="w")
         tk.Label(
             header,
-            text="Strip EXIF, GPS, and hidden metadata from your photos before you share them.",
+            text="// strip EXIF, GPS, and hidden metadata before you share a file",
             font=SUBTITLE_FONT,
-            bg=APP_BG,
+            bg=BG,
             fg=TEXT_SECONDARY,
         ).pack(anchor="w", pady=(3, 0))
 
         actions = ttk.Frame(outer)
         actions.pack(fill=X, pady=(0, 12))
-        ttk.Button(actions, text="Add Images...", command=self.add_files, bootstyle="primary").pack(side=LEFT)
+        ttk.Button(actions, text="ADD IMAGES", command=self.add_files, bootstyle="success").pack(side=LEFT)
         ttk.Button(
-            actions, text="Add Folder...", command=self.add_folder, bootstyle="primary-outline"
+            actions, text="ADD FOLDER", command=self.add_folder, bootstyle="success-outline"
         ).pack(side=LEFT, padx=(8, 0))
         ttk.Button(
-            actions, text="Clear List", command=self.clear_files, bootstyle="secondary-outline"
+            actions, text="CLEAR", command=self.clear_files, bootstyle="secondary-outline"
         ).pack(side=LEFT, padx=(8, 0))
 
-        out_frame = tk.Frame(outer, bg=APP_BG)
+        out_frame = tk.Frame(outer, bg=BG)
         out_frame.pack(fill=X, pady=(0, 12))
-        tk.Label(out_frame, text="Output folder:", font=BODY_FONT, bg=APP_BG, fg=TEXT_PRIMARY).pack(side=LEFT)
+        tk.Label(out_frame, text="OUTPUT:", font=BODY_FONT, bg=BG, fg=TEXT_PRIMARY).pack(side=LEFT)
         self.output_var = tk.StringVar(value="same folder as each original, with _clean suffix")
-        tk.Label(out_frame, textvariable=self.output_var, font=BODY_FONT, bg=APP_BG, fg=TEXT_SECONDARY).pack(
+        tk.Label(out_frame, textvariable=self.output_var, font=BODY_FONT, bg=BG, fg=TEXT_SECONDARY).pack(
             side=LEFT, padx=(8, 0)
         )
         ttk.Button(
-            out_frame, text="Choose...", command=self.choose_output_dir, bootstyle="secondary-outline"
+            out_frame, text="CHOOSE...", command=self.choose_output_dir, bootstyle="secondary-outline"
         ).pack(side=RIGHT)
 
         action_frame = ttk.Frame(outer)
-        action_frame.pack(fill=X, pady=(0, 16))
+        action_frame.pack(fill=X, pady=(0, 6))
         self.remove_button = ttk.Button(
             action_frame,
-            text="Remove Metadata From All",
+            text="REMOVE METADATA FROM ALL",
             command=self.run_stripping,
             bootstyle="success",
             padding=(18, 11),
@@ -354,7 +353,15 @@ class MetadataRemoverApp(ttk.Window):
         self.progress = ttk.Progressbar(action_frame, mode="determinate", bootstyle="success-striped")
         self.progress.pack(side=LEFT, fill=X, expand=True, padx=(16, 0))
 
-        tk.Label(outer, text="IMAGES", font=("Segoe UI", 10, "bold"), bg=APP_BG, fg=TEXT_MUTED).pack(
+        status_frame = tk.Frame(outer, bg=BG)
+        status_frame.pack(fill=X, pady=(4, 16))
+        self.status_var = tk.StringVar(value="> ready")
+        self.status_label = tk.Label(
+            status_frame, textvariable=self.status_var, font=(MONO, 10, "bold"), bg=BG, fg=TEXT_SECONDARY
+        )
+        self.status_label.pack(anchor="w")
+
+        tk.Label(outer, text="// IMAGES", font=(MONO, 10, "bold"), bg=BG, fg=TEXT_MUTED).pack(
             anchor="w", pady=(0, 8)
         )
 
@@ -363,7 +370,7 @@ class MetadataRemoverApp(ttk.Window):
 
         self.empty_hint = tk.Label(
             self.card_list.inner,
-            text="Add images to see their metadata here.",
+            text="// add images to scan for metadata",
             font=BODY_FONT,
             bg=LIST_BG,
             fg=TEXT_MUTED,
@@ -402,18 +409,23 @@ class MetadataRemoverApp(ttk.Window):
             card.set_scanned(report)
         except Exception as exc:
             card.set_scan_error(exc)
+        self.status_var.set(f"> {len(self.cards)} image(s) queued")
 
     def _remove_card(self, card: ImageCard):
         card.destroy()
         self.cards.pop(card.path, None)
         if not self.cards:
             self.empty_hint.pack(pady=50)
+            self.status_var.set("> ready")
+        else:
+            self.status_var.set(f"> {len(self.cards)} image(s) queued")
 
     def clear_files(self):
         for card in list(self.cards.values()):
             card.destroy()
         self.cards.clear()
         self.empty_hint.pack(pady=50)
+        self.status_var.set("> ready")
 
     def choose_output_dir(self):
         folder = filedialog.askdirectory(title="Choose output folder")
@@ -425,19 +437,25 @@ class MetadataRemoverApp(ttk.Window):
 
     def run_stripping(self):
         if not self.cards:
-            messagebox.showinfo(APP_TITLE, "Add at least one image first.")
+            self.status_var.set("> add at least one image first")
+            self.status_label.config(fg=WARNING)
             return
 
         self.remove_button.config(state="disabled")
         self.progress.config(maximum=len(self.cards), value=0)
+        self.status_label.config(fg=CYAN)
 
         thread = threading.Thread(target=self._strip_all, daemon=True)
         thread.start()
 
     def _strip_all(self):
         succeeded = 0
+        total = len(self.cards)
+        done_count = 0
         for path, card in list(self.cards.items()):
             self.after(0, card.set_processing)
+            done_count += 1
+            self.after(0, self.status_var.set, f"> removing metadata... ({done_count}/{total})")
             out_path = self.output_dir / path.name if self.output_dir else default_output_path(path)
             try:
                 strip_metadata(path, out_path)
@@ -449,11 +467,16 @@ class MetadataRemoverApp(ttk.Window):
             finally:
                 self.after(0, self.progress.step, 1)
 
-        self.after(0, self._finish, succeeded, len(self.cards))
+        self.after(0, self._finish, succeeded, total)
 
     def _finish(self, succeeded: int, total: int):
         self.remove_button.config(state="normal")
-        messagebox.showinfo(APP_TITLE, f"Done: {succeeded}/{total} image(s) processed.")
+        if succeeded == total:
+            self.status_var.set(f"> done: {succeeded}/{total} cleaned")
+            self.status_label.config(fg=GREEN)
+        else:
+            self.status_var.set(f"> done: {succeeded}/{total} cleaned, {total - succeeded} failed")
+            self.status_label.config(fg=WARNING)
 
 
 def main():
