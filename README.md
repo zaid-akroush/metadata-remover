@@ -34,12 +34,15 @@ The UI is styled with [ttkbootstrap](https://ttkbootstrap.readthedocs.io/)
 ## Usage
 
 1. **Add Images...** or **Add Folder...** to select one or more images.
-2. Click a file in the list to preview what metadata it currently has.
-3. Optionally **Choose...** an output folder (default: saves next to
+   Each one appears as a card showing a thumbnail and a summary of the
+   metadata found on it (or "No metadata found" if it's already clean).
+2. Optionally **Choose...** an output folder (default: saves next to
    each original with a `_clean` suffix, so your originals are never
    overwritten).
-4. **Remove Metadata From All**: processes every file in the list and
-   logs the result.
+3. **Remove Metadata From All**. Each card updates live: the arrow
+   between the before/after thumbnails turns green, an after-thumbnail
+   appears next to it, and the status line confirms the output filename
+   (or shows an error if that specific file failed).
 
 Supported formats: JPEG, PNG, BMP, TIFF, WEBP.
 
@@ -69,9 +72,4 @@ pytest tests/ -v
 
 ## Building a standalone .exe
 
-Double-click `build_exe.bat` (Windows only). It installs PyInstaller and
-builds `dist\MetadataRemover.exe`, a fully standalone app you can move
-anywhere and double-click to run, no Python install needed on the machine
-you move it to.
-
-PyInstaller can't cross-compile, so this has to be run on Windows itself,
+Double-click `build_exe.bat` (Windows only). It installs PyInst

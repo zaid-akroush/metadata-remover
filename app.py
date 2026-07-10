@@ -15,25 +15,177 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import ttkbootstrap as ttk
+from PIL import Image, ImageTk
 from ttkbootstrap.constants import BOTH, LEFT, RIGHT, X, Y
 
 from core import SUPPORTED_EXTENSIONS, default_output_path, inspect_metadata, strip_metadata
 
 APP_TITLE = "Metadata Remover"
 
+TITLE_FONT = ("Segoe UI", 20, "bold")
 BODY_FONT = ("Segoe UI", 10)
+SMALL_FONT = ("Segoe UI", 9)
 MONO_FONT = ("Consolas", 9)
 
-DARK_PANEL_BG = "#1f2229"
-DARK_PANEL_FG = "#e6e6e6"
-DARK_PANEL_SELECT = "#2f6f4f"
+CARD_BG = "#20242c"
+CARD_BORDER = "#333844"
+THUMB_BG = "#14161b"
+THUMB_SIZE = (96, 96)
+
+
+def _load_thumbnail(path: Path, size=THUMB_SIZE) -> ImageTk.PhotoImage:
+    """Return a PhotoImage thumbnail, letterboxed onto a fixed-size dark tile
+    so every card lines up regardless of the source image's aspect ratio."""
+    tile = Image.new("RGB", size, THUMB_BG)
+    with Image.open(path) as img:
+        img = img.convert("RGB")
+        img.thumbnail(size)
+        offset = ((size[0] - img.width) // 2, (size[1] - img.height) // 2)
+        tile.paste(img, offset)
+    return ImageTk.PhotoImage(tile)
+
+
+def _placeholder_thumbnail(size=THUMB_SIZE) -> ImageTk.PhotoImage:
+    return ImageTk.PhotoImage(Image.new("RGB", size, THUMB_BG))
+
+
+def _short_metadata_summary(report) -> str:
+    if report.is_empty:
+        return "No metadata found"
+    parts = list(report.exif_tags.keys())[:3]
+    extra = report.exif_tags and len(report.exif_tags) > 3
+    text = ", ".join(parts)
+    remaining = len(report.exif_tags) - len(parts) + len(report.info_keys)
+    if remaining > 0:
+        text += f" +{remaining} more" if text else f"{remaining} field(s)"
+    return text or "Metadata present"
+
+
+class ImageCard:
+    """A single row: before-thumbnail | filename + metadata summary | arrow |
+    after-thumbnail + status. Keeps its own PhotoImage references alive
+    (Tk garbage-collects images with no surviving Python reference)."""
+
+    def __init__(self, parent, path: Path, on_remove):
+        self.path = path
+        self.on_remove = on_remove
+
+        self.frame = tk.Frame(parent, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
+        self.frame.pack(fill=X, pady=5, padx=2)
+
+        pad = dict(padx=10, pady=10)
+
+        self.before_photo = _placeholder_thumbnail()
+        self.before_label = tk.Label(self.frame, image=self.before_photo, bg=THUMB_BG, bd=0)
+        self.before_label.grid(row=0, column=0, rowspan=2, **pad)
+
+        info = tk.Frame(self.frame, bg=CARD_BG)
+        info.grid(row=0, column=1, rowspan=2, sticky="w", pady=10)
+
+        self.name_label = tk.Label(
+            info, text=path.name, font=BODY_FONT, bg=CARD_BG, fg="#f0f0f0", anchor="w"
+        )
+        self.name_label.pack(anchor="w")
+
+        self.meta_label = tk.Label(
+            info, text="Scanning...", font=SMALL_FONT, bg=CARD_BG, fg="#a8adb8", anchor="w", justify="left"
+        )
+        self.meta_label.pack(anchor="w", pady=(2, 0))
+
+        self.status_label = tk.Label(
+            info, text="Not processed yet", font=SMALL_FONT, bg=CARD_BG, fg="#7a8094", anchor="w"
+        )
+        self.status_label.pack(anchor="w", pady=(2, 0))
+
+        self.arrow_label = tk.Label(
+            self.frame, text="→", font=("Segoe UI", 22), bg=CARD_BG, fg="#4a4f5c"
+        )
+        self.arrow_label.grid(row=0, column=2, rowspan=2, padx=6)
+
+        self.after_photo = _placeholder_thumbnail()
+        self.after_label = tk.Label(self.frame, image=self.after_photo, bg=THUMB_BG, bd=0)
+        self.after_label.grid(row=0, column=3, rowspan=2, **pad)
+
+        remove_btn = tk.Label(
+            self.frame, text="✕", font=("Segoe UI", 11), bg=CARD_BG, fg="#7a8094", cursor="hand2"
+        )
+        remove_btn.grid(row=0, column=4, sticky="ne", padx=(0, 10), pady=(8, 0))
+        remove_btn.bind("<Button-1>", lambda _e: self.on_remove(self))
+        remove_btn.bind("<Enter>", lambda _e: remove_btn.config(fg="#e0554f"))
+        remove_btn.bind("<Leave>", lambda _e: remove_btn.config(fg="#7a8094"))
+
+        self.frame.grid_columnconfigure(1, weight=1)
+
+    def set_scanned(self, report):
+        try:
+            self.before_photo = _load_thumbnail(self.path)
+            self.before_label.config(image=self.before_photo)
+        except Exception:
+            pass
+        self.meta_label.config(
+            text=_short_metadata_summary(report),
+            fg="#e0b03e" if not report.is_empty else "#7a8094",
+        )
+        self._report = report
+
+    def set_scan_error(self, exc):
+        self.meta_label.config(text=f"Couldn't read: {exc}", fg="#e0554f")
+
+    def set_processing(self):
+        self.status_label.config(text="Processing...", fg="#5aa9e6")
+
+    def set_done(self, out_path: Path, after_report):
+        try:
+            self.after_photo = _load_thumbnail(out_path)
+            self.after_label.config(image=self.after_photo)
+        except Exception:
+            pass
+        self.arrow_label.config(fg="#4fd17a")
+        if after_report.is_empty:
+            self.status_label.config(text=f"Clean -> {out_path.name}", fg="#4fd17a")
+        else:
+            self.status_label.config(text="Some metadata may remain", fg="#e0b03e")
+
+    def set_failed(self, exc):
+        self.status_label.config(text=f"Failed: {exc}", fg="#e0554f")
+        self.arrow_label.config(fg="#e0554f")
+
+    def destroy(self):
+        self.frame.destroy()
+
+
+class ScrollableCardList(ttk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent)
+
+        self.canvas = tk.Canvas(self, bg="#181a1f", highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview, bootstyle="round")
+        self.inner = tk.Frame(self.canvas, bg="#181a1f")
+
+        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self._window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self.scrollbar.pack(side=RIGHT, fill=Y)
+
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", lambda e: self.canvas.yview_scroll(-2, "units"))
+        self.canvas.bind_all("<Button-5>", lambda e: self.canvas.yview_scroll(2, "units"))
+
+    def _on_canvas_resize(self, event):
+        self.canvas.itemconfig(self._window, width=event.width)
+
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
 
 class MetadataRemoverApp(ttk.Window):
     def __init__(self):
-        super().__init__(title=APP_TITLE, themename="darkly", size=(860, 760), minsize=(700, 620))
+        super().__init__(title=APP_TITLE, themename="darkly", size=(920, 760), minsize=(760, 620))
 
-        self.files: list[Path] = []
+        self.cards: dict[Path, ImageCard] = {}
         self.output_dir: Path | None = None
 
         self._build_widgets()
@@ -44,13 +196,9 @@ class MetadataRemoverApp(ttk.Window):
         outer = ttk.Frame(self, padding=18)
         outer.pack(fill=BOTH, expand=True)
 
-        # ---- Header ----
         header = ttk.Frame(outer)
         header.pack(fill=X, pady=(0, 14))
-
-        ttk.Label(
-            header, text="Metadata Remover", font=("Segoe UI", 20, "bold"), bootstyle="light"
-        ).pack(anchor="w")
+        ttk.Label(header, text="Metadata Remover", font=TITLE_FONT, bootstyle="light").pack(anchor="w")
         ttk.Label(
             header,
             text="Strip EXIF, GPS, and hidden metadata from your photos before you share them.",
@@ -58,13 +206,9 @@ class MetadataRemoverApp(ttk.Window):
             bootstyle="secondary",
         ).pack(anchor="w", pady=(2, 0))
 
-        # ---- File action buttons ----
         actions = ttk.Frame(outer)
         actions.pack(fill=X, pady=(0, 10))
-
-        ttk.Button(actions, text="Add Images...", command=self.add_files, bootstyle="info").pack(
-            side=LEFT
-        )
+        ttk.Button(actions, text="Add Images...", command=self.add_files, bootstyle="info").pack(side=LEFT)
         ttk.Button(
             actions, text="Add Folder...", command=self.add_folder, bootstyle="info-outline"
         ).pack(side=LEFT, padx=(8, 0))
@@ -72,61 +216,8 @@ class MetadataRemoverApp(ttk.Window):
             actions, text="Clear List", command=self.clear_files, bootstyle="secondary-outline"
         ).pack(side=LEFT, padx=(8, 0))
 
-        # ---- Middle: file list + metadata preview ----
-        mid = ttk.Frame(outer)
-        mid.pack(fill=BOTH, expand=True, pady=(0, 10))
-        mid.columnconfigure(0, weight=1)
-        mid.columnconfigure(1, weight=1)
-        mid.rowconfigure(0, weight=1)
-
-        list_card = ttk.Labelframe(mid, text="Selected images", padding=8, bootstyle="info")
-        list_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        list_card.rowconfigure(0, weight=1)
-        list_card.columnconfigure(0, weight=1)
-
-        self.listbox = tk.Listbox(
-            list_card,
-            selectmode="extended",
-            bg=DARK_PANEL_BG,
-            fg=DARK_PANEL_FG,
-            selectbackground=DARK_PANEL_SELECT,
-            selectforeground="#ffffff",
-            highlightthickness=0,
-            borderwidth=0,
-            font=BODY_FONT,
-            activestyle="none",
-        )
-        self.listbox.grid(row=0, column=0, sticky="nsew")
-        self.listbox.bind("<<ListboxSelect>>", self._on_select)
-
-        list_scroll = ttk.Scrollbar(list_card, orient="vertical", command=self.listbox.yview, bootstyle="round")
-        list_scroll.grid(row=0, column=1, sticky="ns")
-        self.listbox.config(yscrollcommand=list_scroll.set)
-
-        preview_card = ttk.Labelframe(mid, text="Metadata found", padding=8, bootstyle="info")
-        preview_card.grid(row=0, column=1, sticky="nsew")
-        preview_card.rowconfigure(0, weight=1)
-        preview_card.columnconfigure(0, weight=1)
-
-        self.preview_text = tk.Text(
-            preview_card,
-            wrap="word",
-            state="disabled",
-            bg=DARK_PANEL_BG,
-            fg=DARK_PANEL_FG,
-            insertbackground=DARK_PANEL_FG,
-            highlightthickness=0,
-            borderwidth=0,
-            font=MONO_FONT,
-            padx=8,
-            pady=6,
-        )
-        self.preview_text.grid(row=0, column=0, sticky="nsew")
-
-        # ---- Output folder ----
         out_frame = ttk.Frame(outer)
         out_frame.pack(fill=X, pady=(0, 10))
-
         ttk.Label(out_frame, text="Output folder:", font=BODY_FONT, bootstyle="light").pack(side=LEFT)
         self.output_var = tk.StringVar(value="same folder as each original, with _clean suffix")
         ttk.Label(out_frame, textvariable=self.output_var, font=BODY_FONT, bootstyle="secondary").pack(
@@ -136,10 +227,8 @@ class MetadataRemoverApp(ttk.Window):
             out_frame, text="Choose...", command=self.choose_output_dir, bootstyle="secondary-outline"
         ).pack(side=RIGHT)
 
-        # ---- Main action ----
         action_frame = ttk.Frame(outer)
-        action_frame.pack(fill=X, pady=(0, 10))
-
+        action_frame.pack(fill=X, pady=(0, 12))
         self.remove_button = ttk.Button(
             action_frame,
             text="Remove Metadata From All",
@@ -148,32 +237,23 @@ class MetadataRemoverApp(ttk.Window):
             padding=(16, 10),
         )
         self.remove_button.pack(side=LEFT)
-
         self.progress = ttk.Progressbar(action_frame, mode="determinate", bootstyle="success-striped")
         self.progress.pack(side=LEFT, fill=X, expand=True, padx=(14, 0))
 
-        # ---- Log ----
-        log_card = ttk.Labelframe(outer, text="Log", padding=8, bootstyle="secondary")
-        log_card.pack(fill=BOTH, expand=False)
+        list_label = ttk.Label(outer, text="Images", font=("Segoe UI", 11, "bold"), bootstyle="light")
+        list_label.pack(anchor="w", pady=(0, 6))
 
-        self.log_text = tk.Text(
-            log_card,
-            wrap="word",
-            state="disabled",
-            height=7,
-            bg=DARK_PANEL_BG,
-            fg=DARK_PANEL_FG,
-            insertbackground=DARK_PANEL_FG,
-            highlightthickness=0,
-            borderwidth=0,
-            font=MONO_FONT,
-            padx=8,
-            pady=6,
+        self.card_list = ScrollableCardList(outer)
+        self.card_list.pack(fill=BOTH, expand=True)
+
+        self.empty_hint = tk.Label(
+            self.card_list.inner,
+            text="Add images to see their metadata here.",
+            font=BODY_FONT,
+            bg="#181a1f",
+            fg="#5a5f6c",
         )
-        self.log_text.pack(fill=BOTH, expand=True)
-        self.log_text.tag_configure("ok", foreground="#4fd17a")
-        self.log_text.tag_configure("warn", foreground="#e0b03e")
-        self.log_text.tag_configure("fail", foreground="#e0554f")
+        self.empty_hint.pack(pady=40)
 
     # ---- file selection -----------------------------------------------
 
@@ -197,14 +277,28 @@ class MetadataRemoverApp(ttk.Window):
                 self._add_path(entry)
 
     def _add_path(self, path: Path):
-        if path not in self.files:
-            self.files.append(path)
-            self.listbox.insert("end", str(path))
+        if path in self.cards:
+            return
+        self.empty_hint.pack_forget()
+        card = ImageCard(self.card_list.inner, path, on_remove=self._remove_card)
+        self.cards[path] = card
+        try:
+            report = inspect_metadata(path)
+            card.set_scanned(report)
+        except Exception as exc:
+            card.set_scan_error(exc)
+
+    def _remove_card(self, card: ImageCard):
+        card.destroy()
+        self.cards.pop(card.path, None)
+        if not self.cards:
+            self.empty_hint.pack(pady=40)
 
     def clear_files(self):
-        self.files.clear()
-        self.listbox.delete(0, "end")
-        self._set_preview("")
+        for card in list(self.cards.values()):
+            card.destroy()
+        self.cards.clear()
+        self.empty_hint.pack(pady=40)
 
     def choose_output_dir(self):
         folder = filedialog.askdirectory(title="Choose output folder")
@@ -212,84 +306,39 @@ class MetadataRemoverApp(ttk.Window):
             self.output_dir = Path(folder)
             self.output_var.set(str(self.output_dir))
 
-    # ---- metadata preview -----------------------------------------------
-
-    def _on_select(self, _event):
-        selection = self.listbox.curselection()
-        if not selection:
-            return
-        path = self.files[selection[0]]
-        try:
-            report = inspect_metadata(path)
-            self._set_preview(f"{path.name}\n\n{report.describe()}")
-        except Exception as exc:
-            self._set_preview(f"{path.name}\n\nCouldn't read metadata: {exc}")
-
-    def _set_preview(self, text: str):
-        self.preview_text.config(state="normal")
-        self.preview_text.delete("1.0", "end")
-        self.preview_text.insert("1.0", text)
-        self.preview_text.config(state="disabled")
-
     # ---- stripping --------------------------------------------------------
 
     def run_stripping(self):
-        if not self.files:
+        if not self.cards:
             messagebox.showinfo(APP_TITLE, "Add at least one image first.")
             return
 
         self.remove_button.config(state="disabled")
-        self.progress.config(maximum=len(self.files), value=0)
-        self._log_clear()
+        self.progress.config(maximum=len(self.cards), value=0)
 
         thread = threading.Thread(target=self._strip_all, daemon=True)
         thread.start()
 
     def _strip_all(self):
         succeeded = 0
-        for path in self.files:
-            out_path = (
-                self.output_dir / path.name if self.output_dir else default_output_path(path)
-            )
+        for path, card in list(self.cards.items()):
+            self.after(0, card.set_processing)
+            out_path = self.output_dir / path.name if self.output_dir else default_output_path(path)
             try:
-                before = inspect_metadata(path)
                 strip_metadata(path, out_path)
-                after = inspect_metadata(out_path)
-                if before.is_empty:
-                    self._log(f"OK    {path.name}: no metadata found, saved clean copy anyway", "ok")
-                else:
-                    removed = len(before.exif_tags) + len(before.info_keys)
-                    self._log(
-                        f"OK    {path.name}: removed {removed} metadata field(s) -> {out_path.name}",
-                        "ok",
-                    )
-                if not after.is_empty:
-                    self._log(f"WARN  {path.name}: some metadata may remain: {after.describe()}", "warn")
+                after_report = inspect_metadata(out_path)
+                self.after(0, card.set_done, out_path, after_report)
                 succeeded += 1
             except Exception as exc:
-                self._log(f"FAIL  {path.name}: {exc}", "fail")
+                self.after(0, card.set_failed, exc)
             finally:
                 self.after(0, self.progress.step, 1)
 
-        self.after(0, self._finish, succeeded, len(self.files))
+        self.after(0, self._finish, succeeded, len(self.cards))
 
     def _finish(self, succeeded: int, total: int):
         self.remove_button.config(state="normal")
         messagebox.showinfo(APP_TITLE, f"Done: {succeeded}/{total} image(s) processed.")
-
-    def _log_clear(self):
-        self.log_text.config(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.config(state="disabled")
-
-    def _log(self, line: str, tag: str):
-        def append():
-            self.log_text.config(state="normal")
-            self.log_text.insert("end", line + "\n", tag)
-            self.log_text.see("end")
-            self.log_text.config(state="disabled")
-
-        self.after(0, append)
 
 
 def main():
