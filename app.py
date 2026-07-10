@@ -15,45 +15,87 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import ttkbootstrap as ttk
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 from ttkbootstrap.constants import BOTH, LEFT, RIGHT, X, Y
 
 from core import SUPPORTED_EXTENSIONS, default_output_path, inspect_metadata, strip_metadata
 
 APP_TITLE = "Metadata Remover"
 
-TITLE_FONT = ("Segoe UI", 20, "bold")
-BODY_FONT = ("Segoe UI", 10)
-SMALL_FONT = ("Segoe UI", 9)
-MONO_FONT = ("Consolas", 9)
+# ---- palette --------------------------------------------------------------
+APP_BG = "#0d0e12"
+LIST_BG = "#111319"
+CARD_BG = "#1b1e26"
+CARD_BG_RGB = (27, 30, 38)
+CARD_BORDER = "#2a2e3a"
+TEXT_PRIMARY = "#f3f4f6"
+TEXT_SECONDARY = "#9aa0b0"
+TEXT_MUTED = "#565c6c"
+ACCENT = "#8b6bf2"
+SUCCESS = "#34d399"
+WARNING = "#f2b84b"
+DANGER = "#f2685c"
+PENDING = "#4a4f5e"
+PROCESSING = "#5b9bf2"
 
-CARD_BG = "#20242c"
-CARD_BORDER = "#333844"
-THUMB_BG = "#14161b"
-THUMB_SIZE = (96, 96)
+TITLE_FONT = ("Segoe UI", 21, "bold")
+SUBTITLE_FONT = ("Segoe UI", 10)
+BODY_FONT = ("Segoe UI", 11)
+NAME_FONT = ("Segoe UI", 11, "bold")
+META_FONT = ("Segoe UI", 9)
+BADGE_FONT = ("Segoe UI", 8, "bold")
+
+THUMB_SIZE = (100, 100)
+THUMB_RADIUS = 16
+CARD_HEIGHT = 132
+CARD_RADIUS = 18
+
+
+# ---- image helpers ----------------------------------------------------------
+
+def _rounded_mask(size, radius):
+    mask = Image.new("L", size, 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle([0, 0, size[0] - 1, size[1] - 1], radius=radius, fill=255)
+    return mask
 
 
 def _load_thumbnail(path: Path, size=THUMB_SIZE) -> ImageTk.PhotoImage:
-    """Return a PhotoImage thumbnail, letterboxed onto a fixed-size dark tile
-    so every card lines up regardless of the source image's aspect ratio."""
-    tile = Image.new("RGB", size, THUMB_BG)
+    """Rounded-corner thumbnail, letterboxed onto a card-colored tile so
+    every card lines up regardless of the source image's aspect ratio."""
     with Image.open(path) as img:
         img = img.convert("RGB")
         img.thumbnail(size)
+        base = Image.new("RGB", size, CARD_BG_RGB)
         offset = ((size[0] - img.width) // 2, (size[1] - img.height) // 2)
-        tile.paste(img, offset)
-    return ImageTk.PhotoImage(tile)
+        base.paste(img, offset)
+    base = base.convert("RGBA")
+    base.putalpha(_rounded_mask(size, THUMB_RADIUS))
+    return ImageTk.PhotoImage(base)
 
 
 def _placeholder_thumbnail(size=THUMB_SIZE) -> ImageTk.PhotoImage:
-    return ImageTk.PhotoImage(Image.new("RGB", size, THUMB_BG))
+    tile = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(tile)
+    draw.rounded_rectangle(
+        [1, 1, size[0] - 2, size[1] - 2], radius=THUMB_RADIUS, outline="#2f3340", width=2
+    )
+    return ImageTk.PhotoImage(tile)
+
+
+def _round_rect_points(x1, y1, x2, y2, r):
+    r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
+    return [
+        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+        x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+        x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+    ]
 
 
 def _short_metadata_summary(report) -> str:
     if report.is_empty:
         return "No metadata found"
     parts = list(report.exif_tags.keys())[:3]
-    extra = report.exif_tags and len(report.exif_tags) > 3
     text = ", ".join(parts)
     remaining = len(report.exif_tags) - len(parts) + len(report.info_keys)
     if remaining > 0:
@@ -61,106 +103,176 @@ def _short_metadata_summary(report) -> str:
     return text or "Metadata present"
 
 
+STATE_STYLE = {
+    "pending": (PENDING, "Not processed yet"),
+    "processing": (PROCESSING, "Processing..."),
+    "done": (SUCCESS, None),
+    "warn": (WARNING, None),
+    "failed": (DANGER, None),
+}
+
+
 class ImageCard:
-    """A single row: before-thumbnail | filename + metadata summary | arrow |
-    after-thumbnail + status. Keeps its own PhotoImage references alive
-    (Tk garbage-collects images with no surviving Python reference)."""
+    """One image, rendered as a single rounded-rect canvas so the corners,
+    thumbnails, and accent color are drawn together rather than stacked
+    from separate square widgets."""
 
     def __init__(self, parent, path: Path, on_remove):
         self.path = path
         self.on_remove = on_remove
-
-        self.frame = tk.Frame(parent, bg=CARD_BG, highlightbackground=CARD_BORDER, highlightthickness=1)
-        self.frame.pack(fill=X, pady=5, padx=2)
-
-        pad = dict(padx=10, pady=10)
+        self.state = "pending"
+        self.status_text = "Not processed yet"
+        self.summary = "Scanning..."
+        self.summary_color = TEXT_SECONDARY
 
         self.before_photo = _placeholder_thumbnail()
-        self.before_label = tk.Label(self.frame, image=self.before_photo, bg=THUMB_BG, bd=0)
-        self.before_label.grid(row=0, column=0, rowspan=2, **pad)
-
-        info = tk.Frame(self.frame, bg=CARD_BG)
-        info.grid(row=0, column=1, rowspan=2, sticky="w", pady=10)
-
-        self.name_label = tk.Label(
-            info, text=path.name, font=BODY_FONT, bg=CARD_BG, fg="#f0f0f0", anchor="w"
-        )
-        self.name_label.pack(anchor="w")
-
-        self.meta_label = tk.Label(
-            info, text="Scanning...", font=SMALL_FONT, bg=CARD_BG, fg="#a8adb8", anchor="w", justify="left"
-        )
-        self.meta_label.pack(anchor="w", pady=(2, 0))
-
-        self.status_label = tk.Label(
-            info, text="Not processed yet", font=SMALL_FONT, bg=CARD_BG, fg="#7a8094", anchor="w"
-        )
-        self.status_label.pack(anchor="w", pady=(2, 0))
-
-        self.arrow_label = tk.Label(
-            self.frame, text="→", font=("Segoe UI", 22), bg=CARD_BG, fg="#4a4f5c"
-        )
-        self.arrow_label.grid(row=0, column=2, rowspan=2, padx=6)
-
         self.after_photo = _placeholder_thumbnail()
-        self.after_label = tk.Label(self.frame, image=self.after_photo, bg=THUMB_BG, bd=0)
-        self.after_label.grid(row=0, column=3, rowspan=2, **pad)
 
-        remove_btn = tk.Label(
-            self.frame, text="✕", font=("Segoe UI", 11), bg=CARD_BG, fg="#7a8094", cursor="hand2"
+        self.canvas = tk.Canvas(parent, height=CARD_HEIGHT, bg=LIST_BG, highlightthickness=0)
+        self.canvas.pack(fill=X, pady=6, padx=2)
+        self.canvas.bind("<Configure>", lambda e: self._redraw())
+        self.canvas.bind("<Button-1>", self._on_click)
+
+    # ---- drawing ----------------------------------------------------------
+
+    def _redraw(self):
+        c = self.canvas
+        c.delete("all")
+        w = c.winfo_width()
+        h = CARD_HEIGHT
+        if w < 10:
+            return
+
+        accent, _ = STATE_STYLE[self.state]
+
+        # card background
+        c.create_polygon(
+            _round_rect_points(1, 1, w - 1, h - 1, CARD_RADIUS),
+            smooth=True, fill=CARD_BG, outline=CARD_BORDER, width=1,
         )
-        remove_btn.grid(row=0, column=4, sticky="ne", padx=(0, 10), pady=(8, 0))
-        remove_btn.bind("<Button-1>", lambda _e: self.on_remove(self))
-        remove_btn.bind("<Enter>", lambda _e: remove_btn.config(fg="#e0554f"))
-        remove_btn.bind("<Leave>", lambda _e: remove_btn.config(fg="#7a8094"))
+        # left accent bar (rounded to match card's left corners)
+        c.create_polygon(
+            _round_rect_points(1, 1, 6, h - 1, CARD_RADIUS),
+            smooth=True, fill=accent, outline="",
+        )
 
-        self.frame.grid_columnconfigure(1, weight=1)
+        pad = 16
+        thumb_y = h // 2
+
+        # before thumbnail
+        c.create_image(pad + THUMB_SIZE[0] // 2, thumb_y, image=self.before_photo)
+
+        # text block
+        text_x = pad * 2 + THUMB_SIZE[0]
+        after_x = w - pad - THUMB_SIZE[0] // 2
+        arrow_x = after_x - THUMB_SIZE[0] // 2 - 34
+        text_wrap = max(120, arrow_x - 34 - text_x)
+
+        c.create_text(
+            text_x, thumb_y - 28, anchor="w", text=self.path.name,
+            font=NAME_FONT, fill=TEXT_PRIMARY, width=text_wrap,
+        )
+        c.create_text(
+            text_x, thumb_y - 6, anchor="w", text=self.summary,
+            font=META_FONT, fill=self.summary_color, width=text_wrap,
+        )
+        # status pill
+        pill_text = self.status_text
+        pill_pad_x = 8
+        text_id = c.create_text(
+            0, 0, anchor="nw", text=pill_text, font=BADGE_FONT
+        )
+        bbox = c.bbox(text_id)
+        c.delete(text_id)
+        pill_w = (bbox[2] - bbox[0]) + pill_pad_x * 2 if bbox else 60
+        pill_h = 20
+        pill_y0 = thumb_y + 12
+        c.create_polygon(
+            _round_rect_points(text_x, pill_y0, text_x + pill_w, pill_y0 + pill_h, pill_h / 2),
+            smooth=True, fill=self._pill_bg(accent), outline="",
+        )
+        c.create_text(
+            text_x + pill_w / 2, pill_y0 + pill_h / 2, text=pill_text,
+            font=BADGE_FONT, fill=accent,
+        )
+
+        # arrow badge (circle + chevron)
+        r = 15
+        c.create_oval(arrow_x - r, thumb_y - r, arrow_x + r, thumb_y + r, fill="#20232c", outline=accent, width=2)
+        c.create_text(arrow_x, thumb_y, text="›", font=("Segoe UI", 15, "bold"), fill=accent)
+
+        # after thumbnail
+        c.create_image(after_x, thumb_y, image=self.after_photo)
+
+        # remove (x) button, top-right
+        c.create_text(
+            w - 16, 16, text="✕", font=("Segoe UI", 11), fill=TEXT_MUTED, tags="remove", anchor="ne"
+        )
+        c.tag_bind("remove", "<Button-1>", lambda e: self.on_remove(self))
+
+    @staticmethod
+    def _pill_bg(hex_color: str) -> str:
+        # a dim tint of the accent color for the pill background
+        hex_color = hex_color.lstrip("#")
+        r, g, b = (int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+        r = int(r * 0.22)
+        g = int(g * 0.22)
+        b = int(b * 0.22)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _on_click(self, _event):
+        pass
+
+    # ---- state updates -----------------------------------------------------
 
     def set_scanned(self, report):
         try:
             self.before_photo = _load_thumbnail(self.path)
-            self.before_label.config(image=self.before_photo)
         except Exception:
             pass
-        self.meta_label.config(
-            text=_short_metadata_summary(report),
-            fg="#e0b03e" if not report.is_empty else "#7a8094",
-        )
-        self._report = report
+        self.summary = _short_metadata_summary(report)
+        self.summary_color = WARNING if not report.is_empty else TEXT_MUTED
+        self._redraw()
 
     def set_scan_error(self, exc):
-        self.meta_label.config(text=f"Couldn't read: {exc}", fg="#e0554f")
+        self.summary = f"Couldn't read: {exc}"
+        self.summary_color = DANGER
+        self._redraw()
 
     def set_processing(self):
-        self.status_label.config(text="Processing...", fg="#5aa9e6")
+        self.state = "processing"
+        self.status_text = "Processing..."
+        self._redraw()
 
     def set_done(self, out_path: Path, after_report):
         try:
             self.after_photo = _load_thumbnail(out_path)
-            self.after_label.config(image=self.after_photo)
         except Exception:
             pass
-        self.arrow_label.config(fg="#4fd17a")
         if after_report.is_empty:
-            self.status_label.config(text=f"Clean -> {out_path.name}", fg="#4fd17a")
+            self.state = "done"
+            self.status_text = f"Clean → {out_path.name}"
         else:
-            self.status_label.config(text="Some metadata may remain", fg="#e0b03e")
+            self.state = "warn"
+            self.status_text = "Some metadata may remain"
+        self._redraw()
 
     def set_failed(self, exc):
-        self.status_label.config(text=f"Failed: {exc}", fg="#e0554f")
-        self.arrow_label.config(fg="#e0554f")
+        self.state = "failed"
+        self.status_text = f"Failed: {exc}"
+        self._redraw()
 
     def destroy(self):
-        self.frame.destroy()
+        self.canvas.destroy()
 
 
 class ScrollableCardList(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
 
-        self.canvas = tk.Canvas(self, bg="#181a1f", highlightthickness=0)
+        self.canvas = tk.Canvas(self, bg=LIST_BG, highlightthickness=0)
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview, bootstyle="round")
-        self.inner = tk.Frame(self.canvas, bg="#181a1f")
+        self.inner = tk.Frame(self.canvas, bg=LIST_BG)
 
         self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self._window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
@@ -183,7 +295,8 @@ class ScrollableCardList(ttk.Frame):
 
 class MetadataRemoverApp(ttk.Window):
     def __init__(self):
-        super().__init__(title=APP_TITLE, themename="darkly", size=(920, 760), minsize=(760, 620))
+        super().__init__(title=APP_TITLE, themename="darkly", size=(960, 780), minsize=(780, 620))
+        self.configure(bg=APP_BG)
 
         self.cards: dict[Path, ImageCard] = {}
         self.output_dir: Path | None = None
@@ -193,34 +306,35 @@ class MetadataRemoverApp(ttk.Window):
     # ---- UI construction -------------------------------------------------
 
     def _build_widgets(self):
-        outer = ttk.Frame(self, padding=18)
+        outer = tk.Frame(self, bg=APP_BG, padx=22, pady=20)
         outer.pack(fill=BOTH, expand=True)
 
-        header = ttk.Frame(outer)
-        header.pack(fill=X, pady=(0, 14))
-        ttk.Label(header, text="Metadata Remover", font=TITLE_FONT, bootstyle="light").pack(anchor="w")
-        ttk.Label(
+        header = tk.Frame(outer, bg=APP_BG)
+        header.pack(fill=X, pady=(0, 16))
+        tk.Label(header, text="Metadata Remover", font=TITLE_FONT, bg=APP_BG, fg=TEXT_PRIMARY).pack(anchor="w")
+        tk.Label(
             header,
             text="Strip EXIF, GPS, and hidden metadata from your photos before you share them.",
-            font=BODY_FONT,
-            bootstyle="secondary",
-        ).pack(anchor="w", pady=(2, 0))
+            font=SUBTITLE_FONT,
+            bg=APP_BG,
+            fg=TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(3, 0))
 
         actions = ttk.Frame(outer)
-        actions.pack(fill=X, pady=(0, 10))
-        ttk.Button(actions, text="Add Images...", command=self.add_files, bootstyle="info").pack(side=LEFT)
+        actions.pack(fill=X, pady=(0, 12))
+        ttk.Button(actions, text="Add Images...", command=self.add_files, bootstyle="primary").pack(side=LEFT)
         ttk.Button(
-            actions, text="Add Folder...", command=self.add_folder, bootstyle="info-outline"
+            actions, text="Add Folder...", command=self.add_folder, bootstyle="primary-outline"
         ).pack(side=LEFT, padx=(8, 0))
         ttk.Button(
             actions, text="Clear List", command=self.clear_files, bootstyle="secondary-outline"
         ).pack(side=LEFT, padx=(8, 0))
 
-        out_frame = ttk.Frame(outer)
-        out_frame.pack(fill=X, pady=(0, 10))
-        ttk.Label(out_frame, text="Output folder:", font=BODY_FONT, bootstyle="light").pack(side=LEFT)
+        out_frame = tk.Frame(outer, bg=APP_BG)
+        out_frame.pack(fill=X, pady=(0, 12))
+        tk.Label(out_frame, text="Output folder:", font=BODY_FONT, bg=APP_BG, fg=TEXT_PRIMARY).pack(side=LEFT)
         self.output_var = tk.StringVar(value="same folder as each original, with _clean suffix")
-        ttk.Label(out_frame, textvariable=self.output_var, font=BODY_FONT, bootstyle="secondary").pack(
+        tk.Label(out_frame, textvariable=self.output_var, font=BODY_FONT, bg=APP_BG, fg=TEXT_SECONDARY).pack(
             side=LEFT, padx=(8, 0)
         )
         ttk.Button(
@@ -228,20 +342,21 @@ class MetadataRemoverApp(ttk.Window):
         ).pack(side=RIGHT)
 
         action_frame = ttk.Frame(outer)
-        action_frame.pack(fill=X, pady=(0, 12))
+        action_frame.pack(fill=X, pady=(0, 16))
         self.remove_button = ttk.Button(
             action_frame,
             text="Remove Metadata From All",
             command=self.run_stripping,
             bootstyle="success",
-            padding=(16, 10),
+            padding=(18, 11),
         )
         self.remove_button.pack(side=LEFT)
         self.progress = ttk.Progressbar(action_frame, mode="determinate", bootstyle="success-striped")
-        self.progress.pack(side=LEFT, fill=X, expand=True, padx=(14, 0))
+        self.progress.pack(side=LEFT, fill=X, expand=True, padx=(16, 0))
 
-        list_label = ttk.Label(outer, text="Images", font=("Segoe UI", 11, "bold"), bootstyle="light")
-        list_label.pack(anchor="w", pady=(0, 6))
+        tk.Label(outer, text="IMAGES", font=("Segoe UI", 10, "bold"), bg=APP_BG, fg=TEXT_MUTED).pack(
+            anchor="w", pady=(0, 8)
+        )
 
         self.card_list = ScrollableCardList(outer)
         self.card_list.pack(fill=BOTH, expand=True)
@@ -250,10 +365,10 @@ class MetadataRemoverApp(ttk.Window):
             self.card_list.inner,
             text="Add images to see their metadata here.",
             font=BODY_FONT,
-            bg="#181a1f",
-            fg="#5a5f6c",
+            bg=LIST_BG,
+            fg=TEXT_MUTED,
         )
-        self.empty_hint.pack(pady=40)
+        self.empty_hint.pack(pady=50)
 
     # ---- file selection -----------------------------------------------
 
@@ -292,13 +407,13 @@ class MetadataRemoverApp(ttk.Window):
         card.destroy()
         self.cards.pop(card.path, None)
         if not self.cards:
-            self.empty_hint.pack(pady=40)
+            self.empty_hint.pack(pady=50)
 
     def clear_files(self):
         for card in list(self.cards.values()):
             card.destroy()
         self.cards.clear()
-        self.empty_hint.pack(pady=40)
+        self.empty_hint.pack(pady=50)
 
     def choose_output_dir(self):
         folder = filedialog.askdirectory(title="Choose output folder")
